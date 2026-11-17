@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Bowling Pro 3D</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
+  #game { width:100vw; height:100vh; display:block; }
+  #hud {
+    position:fixed; top:15px; left:15px; right:15px; z-index:10;
+    display:flex; justify-content:space-between;
+    color:#0ff; font-size:20px; text-shadow:0 0 10px #0ff; pointer-events:none;
+  }
+  #powerBar {
+    position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+    width:300px; height:20px; background:rgba(0,0,0,0.6);
+    border:2px solid #0ff; border-radius:10px; overflow:hidden; z-index:10;
+  }
+  #powerFill { height:100%; width:0%; background:linear-gradient(90deg,#0ff,#f0f); }
+  #overlay {
+    position:fixed; inset:0; background:rgba(0,0,0,0.85);
+    display:flex; flex-direction:column; justify-content:center; align-items:center;
+    z-index:100; color:#fff; text-align:center;
+  }
+  #overlay h1 { font-size:48px; color:#0ff; text-shadow:0 0 20px #0ff; margin-bottom:20px; }
+  #overlay p { font-size:18px; margin-bottom:30px; color:#aaa; max-width:600px; }
+  #overlay button {
+    padding:15px 50px; font-size:20px; background:linear-gradient(90deg,#0ff,#f0f);
+    border:none; border-radius:30px; color:#000; font-weight:bold; cursor:pointer; margin:5px;
+  }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">
+  <div>🎳 ROUND: <span id="round">1</span>/10</div>
+  <div>🎯 PINS: <span id="pinsLeft">10</span></div>
+  <div>🏆 SCORE: <span id="score">0</span></div>
+</div>
+<div id="powerBar"><div id="powerFill"></div></div>
+<div id="overlay">
+  <h1>BOWLING PRO 3D</h1>
+  <p>Ekran pastki qismidan bosing va torting — kuch va yo'nalishni belgilang. Qo'yib yuboring — to'p otiladi.</p>
+  <button id="startBtn">START GAME</button>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const canvas = document.getElementById('game');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled = true;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x050510);
+scene.fog = new THREE.Fog(0x050510, 20, 60);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 3.5, 3);
+camera.lookAt(0, 0.5, -15);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+const spot = new THREE.SpotLight(0xffffff, 2, 40, Math.PI/4, 0.5);
+spot.position.set(0, 10, 0);
+spot.target.position.set(0, 0, -15);
+spot.castShadow = true;
+scene.add(spot, spot.target);
+const neon = new THREE.PointLight(0x00ffff, 2, 30);
+neon.position.set(0, 4, -8);
+scene.add(neon);
+const purple = new THREE.PointLight(0xff00ff, 2, 30);
+purple.position.set(-5, 3, -15);
+scene.add(purple);
+
+// LANE
+const lane = new THREE.Mesh(
+  new THREE.PlaneGeometry(3, 30),
+  new THREE.MeshStandardMaterial({ color:0xc8a97a, roughness:0.6 })
+);
+lane.rotation.x = -Math.PI/2;
+lane.position.set(0, 0, -10);
+lane.receiveShadow = true;
+scene.add(lane);
+
+// side gutters
+[-1.75, 1.75].forEach(x => {
+  const g = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.3, 30),
+    new THREE.MeshStandardMaterial({ color:0x111122, metalness:0.8, roughness:0.2 })
+  );
+  g.position.set(x, -0.15, -10);
+  scene.add(g);
+});
+
+// lane markers
+for (let i = 0; i < 7; i++) {
+  const dot = new THREE.Mesh(
+    new THREE.CircleGeometry(0.06, 8),
+    new THREE.MeshBasicMaterial({ color:0x000000 })
+  );
+  dot.rotation.x = -Math.PI/2;
+  dot.position.set(0, 0.01, 2 - i*0.5);
+  scene.add(dot);
+}
+
+// BALL
+const ball = new THREE.Mesh(
+  new THREE.SphereGeometry(0.35, 24, 24),
+  new THREE.MeshStandardMaterial({ color:0x00ffff, metalness:0.9, roughness:0.1, emissive:0x004466 })
+);
+ball.position.set(0, 0.35, 3);
+ball.castShadow = true;
+scene.add(ball);
+const ballPhys = { vel: new THREE.Vector3(), active:false, spin:0, time:0 };
+
+// PINS
+const pins = [];
+function createPin(x, z) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.15, 0.2, 0.9, 12),
+    new THREE.MeshStandardMaterial({ color:0xffffff, roughness:0.4 })
+  );
+  body.position.y = 0.45;
+  body.castShadow = true;
+  const stripe = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.152, 0.152, 0.12, 12),
+    new THREE.MeshStandardMaterial({ color:0xff0000 })
+  );
+  stripe.position.y = 0.6;
+  g.add(body, stripe);
+  g.position.set(x, 0, z);
+  g.userData = { knocked:false, origX:x, origZ:z, vel:new THREE.Vector3(), rot:new THREE.Vector3() };
+  scene.add(g);
+  pins.push(g);
+}
+
+function setupPins() {
+  // remove old pins
+  pins.forEach(p => scene.remove(p));
+  pins.length = 0;
+  const startZ = -15;
+  const rowGap = 0.7;
+  const pinGap = 0.5;
+  for (let row = 0; row < 4; row++) {
+    for (let col = 0; col <= row; col++) {
+      const x = (col - row/2) * pinGap;
+      const z = startZ - row * rowGap;
+      createPin(x, z);
+    }
+  }
+  document.getElementById('pinsLeft').textContent = 10;
+}
+setupPins();
+
+// STATE
+const state = {
+  running: false,
+  round: 1,
+  score: 0,
+  pinsKnocked: 0,
+  roll: 1, // 1 or 2 per round
+  charging: false,
+  power: 0,
+  aimX: 0,
+  shotTime: 0,
+};
+
+// INPUT
+const powerFill = document.getElementById('powerFill');
+let startX = 0, startY = 0;
+addEventListener('mousedown', e => {
+  if (!state.running || ballPhys.active) return;
+  state.charging = true;
+  state.power = 0;
+  startX = e.clientX;
+  startY = e.clientY;
+});
+addEventListener('mouseup', e => {
+  if (!state.charging || ballPhys.active) return;
+  throwBall();
+});
+addEventListener('mousemove', e => {
+  if (!state.charging) return;
+  const dx = (e.clientX - startX) / innerWidth;
+  state.aimX = dx * 4;
+  ball.position.x = state.aimX * 0.5;
+});
+addEventListener('touchstart', e => {
+  if (!state.running || ballPhys.active) return;
+  state.charging = true;
+  state.power = 0;
+  const t = e.touches[0];
+  startX = t.clientX; startY = t.clientY;
+});
+addEventListener('touchend', e => {
+  if (state.charging && !ballPhys.active) throwBall();
+});
+addEventListener('touchmove', e => {
+  if (!state.charging) return;
+  const t = e.touches[0];
+  state.aimX = ((t.clientX - startX)/innerWidth) * 4;
+  ball.position.x = state.aimX * 0.5;
+});
+
+function throwBall() {
+  state.charging = false;
+  ballPhys.active = true;
+  ballPhys.time = 0;
+  const power = Math.max(0.3, state.power/100);
+  ballPhys.vel.set(state.aimX * 0.15, 0, -0.3 - power * 1.2);
+  ballPhys.spin = -state.aimX * 0.5;
+  state.shotTime = performance.now();
+}
+
+function gameLoop() {
+  requestAnimationFrame(gameLoop);
+  const dt = Math.min(0.05, 0.016);
+
+  if (state.running) {
+    if (state.charging) {
+      state.power = Math.min(100, state.power + 2);
+      powerFill.style.width = state.power + '%';
+    }
+
+    if (ballPhys.active) {
+      ballPhys.time += dt;
+      ball.position.add(ballPhys.vel);
+      ball.rotation.x += ballPhys.vel.length() * 0.1;
+      ball.position.x += ballPhys.spin * 0.01;
+
+      // gutter check
+      if (Math.abs(ball.position.x) > 1.6) {
+        ball.position.x = Math.sign(ball.position.x) * 1.6;
+        ballPhys.vel.x = 0;
+      }
+
+      // pin collision
+      pins.forEach(p => {
+        if (p.userData.knocked) return;
+        const dx = p.position.x - ball.position.x;
+        const dz = p.position.z - ball.position.z;
+        const dist = Math.sqrt(dx*dx + dz*dz);
+        if (dist < 0.6) {
+          p.userData.knocked = true;
+          p.userData.vel.set(dx*0.1, 0, dz*0.1);
+          state.pinsKnocked++;
+          document.getElementById('pinsLeft').textContent =
+            Math.max(0, 10 - state.pinsKnocked);
+        }
+      });
+
+      // end of shot
+      if (ballPhys.time > 3 || ball.position.z < -20) {
+        endShot();
+      }
+    }
+
+    // animate knocked pins
+    pins.forEach(p => {
+      if (p.userData.knocked) {
+        p.userData.vel.y -= 0.015;
+        p.position.add(p.userData.vel);
+        p.rotation.x += 0.15;
+        p.rotation.z += 0.1;
+      }
+    });
+  }
+
+  renderer.render(scene, camera);
+}
+gameLoop();
+
+function endShot() {
+  ballPhys.active = false;
+  setTimeout(() => {
+    if (state.roll === 1) {
+      state.roll = 2;
+      resetBall();
+    } else {
+      // end round
+      state.round++;
+      state.roll = 1;
+      if (state.round > 10) {
+        endGame();
+        return;
+      }
+      state.pinsKnocked = 0;
+      document.getElementById('round').textContent = state.round;
+      setupPins();
+      resetBall();
+    }
+  }, 500);
+}
+
+function resetBall() {
+  ball.position.set(0, 0.35, 3);
+  ball.rotation.set(0,0,0);
+  ballPhys.vel.set(0,0,0);
+  ballPhys.active = false;
+  ballPhys.time = 0;
+  state.power = 0;
+  powerFill.style.width = '0%';
+}
+
+function endGame() {
+  state.running = false;
+  const overlay = document.getElementById('overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <h1>GAME OVER</h1>
+    <p>Umumiy ochko: ${state.score}</p>
+    <button id="restartBtn">QAYTA O'YNASH</button>
+  `;
+  document.getElementById('restartBtn').addEventListener('click', ()=>location.reload());
+}
+
+document.getElementById('startBtn').addEventListener('click', () => {
+  document.getElementById('overlay').classList.add('hidden');
+  state.running = true;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
